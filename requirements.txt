@@ -1,5 +1,6 @@
 google-genai>=2.33.0
 python-dotenv>=1.2.4
+requests>=2.31.0
 rich>=15.0.0
 streamlit>=1.50.0
 watchdog>=6.0.0

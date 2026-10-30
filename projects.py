@@ -93,13 +93,14 @@ class ProjectManager:
                         if not line:
                             break
                         if "**Видео**:" in line:
-                            # [Title](URL) or plain URL
-                            m = re.search(r"\[(.*?)\]\((https?://.*?)\)", line)
+                            val = line.split("**Видео**:", 1)[1].strip()
+                            m = re.search(r"\[(.*?)\]\((.*?)\)", val)
                             if m:
                                 video_title = m.group(1)
                                 video_url = m.group(2)
                             else:
-                                video_url = line.split(":", 1)[1].strip()
+                                video_title = val
+                                video_url = val
                         elif "**Канал**:" in line:
                             m = re.search(r"\[(.*?)\]\((https?://.*?)\)", line)
                             if m:

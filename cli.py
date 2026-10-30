@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Консольная утилита (CLI) для анализа видео плейтестов и сводного мета-анализа по проектам.
+Поддерживает YouTube, Google Drive и локальные видеофайлы, а также кастомные скиллы из skills/*.json.
 """
 
 import argparse
@@ -16,9 +17,10 @@ from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from analyzer import VideoAnalyzer
+from drive_downloader import GoogleDriveDownloader
 from meta_analyzer import MetaAnalyzer
 from projects import ProjectManager
-from prompts import PRESETS, build_analysis_prompt
+from skills import SkillManager
 from youtube_meta import fetch_youtube_metadata
 
 console = Console()
@@ -28,9 +30,9 @@ def interactive_mode():
     """Интерактивный мастер запуска анализа."""
     console.print(
         Panel.fit(
-            "[bold cyan]🎮 Game UX & Playtest Video Recap Tool[/bold cyan]\n"
-            "[dim]Powered by Gemini Agentic Video Understanding[/dim]",
-            border_style="cyan"
+            "[bold cyan]🎮 Game & Video Recap Tool[/bold cyan]\n"
+            "[dim]Powered by Gemini Agentic Video Understanding (YouTube, Local, Google Drive)[/dim]",
+            border_style="cyan",
         )
     )
 
@@ -39,15 +41,15 @@ def interactive_mode():
 
     console.print(f"\n[bold]Существующие проекты (папки в reports/):[/bold] {', '.join(proj_names)}")
     project_name = Prompt.ask(
-        "Выберите проект или введите новое имя игры",
-        default=proj_names[0] if proj_names else "superweird"
+        "Выберите проект или введите новое имя игры/темы",
+        default=proj_names[0] if proj_names else "superweird",
     )
 
     action = Prompt.ask(
         "\nЧто вы хотите сделать?",
         choices=["1", "2"],
         default="1",
-        show_choices=False
+        show_choices=False,
     )
     # 1: Анализ нового видео, 2: Сводный мета-рекап всех отчетов проекта
 
@@ -55,54 +57,61 @@ def interactive_mode():
         return {
             "mode": "meta",
             "project": project_name,
-            "focus_question": Prompt.ask("Особый вопрос для мета-анализа (Enter для пропуска)", default=""),
-            "model": "gemini-3.5-flash"
+            "focus_question": Prompt.ask(
+                "Особый вопрос для мета-анализа (Enter для пропуска)", default=""
+            ),
+            "model": "gemini-3.5-flash",
         }
 
-    # 1. Запрос ссылки на видео
+    # 1. Запрос источника видео (YouTube, Google Drive или локальный файл)
     while True:
-        url = Prompt.ask("\n[bold yellow]Введите ссылку на YouTube-видео плейтеста[/bold yellow]").strip()
-        if not url:
-            console.print("[red]Ссылка не может быть пустой![/red]")
+        source = Prompt.ask(
+            "\n[bold yellow]Введите ссылку на YouTube, Google Drive или путь к локальному видеофайлу[/bold yellow]"
+        ).strip()
+        if not source:
+            console.print("[red]Источник не может быть пустым![/red]")
             continue
-        video_id = VideoAnalyzer.extract_youtube_video_id(url)
-        if not video_id:
-            if not Confirm.ask("[yellow]Не удалось определить стандартный YouTube ID. Продолжить с этой ссылкой?[/yellow]"):
-                continue
+        if source.startswith("http") or Path(source).exists():
+            break
+        if not Confirm.ask(f"[yellow]Файл '{source}' не найден на диске. Продолжить всё равно?[/yellow]"):
+            continue
         break
 
-    # 2. Выбор пресета критериев
-    console.print("\n[bold]Выберите фокус анализа:[/bold]")
-    preset_keys = list(PRESETS.keys())
+    # 2. Выбор навыка / пресета из SkillManager
+    console.print("\n[bold]Выберите навык (Skill / Пресет):[/bold]")
+    all_skills = SkillManager.list_skills()
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("#", style="dim", width=4)
-    table.add_column("Пресет", style="cyan")
+    table.add_column("Навык (Skill)", style="cyan")
+    table.add_column("Тип", style="green", width=14)
     table.add_column("Описание", style="white")
 
-    for i, key in enumerate(preset_keys, 1):
-        preset = PRESETS[key]
-        table.add_row(str(i), preset["title"], preset["description"])
+    for i, s in enumerate(all_skills, 1):
+        stype = "Встроенный" if s.is_builtin else "Свой скилл"
+        table.add_row(str(i), s.title, stype, s.description)
 
     console.print(table)
 
-    preset_choice = Prompt.ask(
-        "Номер пресета",
-        choices=[str(i) for i in range(1, len(preset_keys) + 1)],
-        default="1"
+    skill_choice = Prompt.ask(
+        "Номер навыка",
+        choices=[str(i) for i in range(1, len(all_skills) + 1)],
+        default="1",
     )
-    chosen_preset = preset_keys[int(preset_choice) - 1]
+    chosen_skill = all_skills[int(skill_choice) - 1]
 
-    # 3. Контекст игры
-    game_context = Prompt.ask(
-        "\n[bold]Краткий контекст игры[/bold] (жанр, ключевые механики или Enter для пропуска)",
-        default=""
+    # 3. Контекст
+    user_context = Prompt.ask(
+        "\n[bold]Краткий контекст видео[/bold] (жанр, цель анализа или Enter для пропуска)",
+        default="",
     )
 
     # 4. Дополнительные вопросы
     custom_questions = []
-    console.print("\n[bold]Специфические вопросы для плейтеста[/bold]:")
+    console.print("\n[bold]Специфические вопросы для проверки[/bold]:")
     while True:
-        q = Prompt.ask(f"Вопрос #{len(custom_questions) + 1} (Enter чтобы закончить)", default="").strip()
+        q = Prompt.ask(
+            f"Вопрос #{len(custom_questions) + 1} (Enter чтобы закончить)", default=""
+        ).strip()
         if not q:
             break
         custom_questions.append(q)
@@ -111,39 +120,58 @@ def interactive_mode():
     model = Prompt.ask(
         "\n[bold]Модель Gemini[/bold]",
         choices=VideoAnalyzer.SUPPORTED_MODELS,
-        default="gemini-3.5-flash"
+        default="gemini-3.5-flash",
     )
 
     return {
         "mode": "video",
-        "url": url,
+        "video": source,
         "project": project_name,
-        "preset": chosen_preset,
-        "game_context": game_context,
+        "skill": chosen_skill,
+        "context": user_context,
         "custom_questions": custom_questions,
         "model": model,
-        "output": None
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Game Playtest Video Recap & Meta-Analysis via Gemini Agentic Video Understanding."
+        description="Video Recap & Meta-Analysis via Gemini Agentic Video Understanding."
     )
-    parser.add_argument("--url", "-u", type=str, help="Ссылка на видео YouTube.")
-    parser.add_argument("--project", "-P", type=str, default="superweird", help="Папка проекта в reports/.")
     parser.add_argument(
+        "--video",
+        "-v",
+        "--url",
+        "-u",
+        dest="video",
+        type=str,
+        help="Ссылка на YouTube, Google Drive или путь к локальному файлу (MP4, MOV и др.).",
+    )
+    parser.add_argument(
+        "--project", "-P", type=str, default="superweird", help="Папка проекта в reports/."
+    )
+    parser.add_argument(
+        "--skill",
         "--preset",
         "-p",
-        choices=list(PRESETS.keys()),
+        dest="skill_id",
+        type=str,
         default="full_ux_audit",
-        help="Пресет критериев для анализа."
+        help="ID навыка/пресета (например, full_ux_audit, cinematic_editing, ad_hooks_retention).",
     )
-    parser.add_argument("--questions", "-q", nargs="+", help="Список кастомных вопросов разработчика к видео.")
-    parser.add_argument("--context", "-c", type=str, default="", help="Контекст об игре.")
-    parser.add_argument("--model", "-m", choices=VideoAnalyzer.SUPPORTED_MODELS, default="gemini-3.5-flash")
-    parser.add_argument("--meta", action="store_true", help="Запустить сводный мета-анализ всех отчётов проекта.")
-    parser.add_argument("--interactive", "-i", action="store_true", help="Запуск в интерактивном режиме.")
+    parser.add_argument(
+        "--questions", "-q", nargs="+", help="Список кастомных вопросов разработчика к видео."
+    )
+    parser.add_argument("--context", "-c", type=str, default="", help="Контекст о видео.")
+    parser.add_argument(
+        "--model", "-m", choices=VideoAnalyzer.SUPPORTED_MODELS, default="gemini-3.5-flash"
+    )
+    parser.add_argument(
+        "--meta", action="store_true", help="Запустить сводный мета-анализ всех отчётов проекта."
+    )
+    parser.add_argument(
+        "--interactive", "-i", action="store_true", help="Запуск в интерактивном режиме."
+    )
 
     args = parser.parse_args()
 
@@ -151,21 +179,22 @@ def main():
         console.print("\n[bold red]⚠️ Ошибка: Переменная GEMINI_API_KEY не задана в .env![/bold red]\n")
         sys.exit(1)
 
-    if args.interactive or (not args.url and not args.meta):
+    if args.interactive or (not args.video and not args.meta):
         params = interactive_mode()
         if params.get("mode") == "meta":
             args.meta = True
             args.project = params["project"]
             focus_q = params.get("focus_question", "")
         else:
-            args.url = params["url"]
+            args.video = params["video"]
             args.project = params["project"]
-            args.preset = params["preset"]
-            args.context = params["game_context"]
+            chosen_skill = params["skill"]
+            args.context = params["context"]
             args.questions = params["custom_questions"]
             args.model = params["model"]
             focus_q = ""
     else:
+        chosen_skill = SkillManager.get_skill(args.skill_id)
         focus_q = ""
 
     # РЕЖИМ 1: СВОДНЫЙ МЕТА-АНАЛИЗ ВСЕХ ОТЧЕТОВ ПРОЕКТА
@@ -179,58 +208,69 @@ def main():
         reports_payload = []
         for rep in reports:
             with open(rep["path"], "r", encoding="utf-8") as f:
-                reports_payload.append({
-                    "filename": rep["filename"],
-                    "content": f.read()
-                })
+                reports_payload.append({"filename": rep["filename"], "content": f.read()})
 
         meta_analyzer = MetaAnalyzer(model=args.model)
         proj_obj = ProjectManager.get_project(args.project) or ProjectManager.create_project(args.project)
 
-        with console.status(f"[bold green]Gemini синтезирует {len(reports_payload)} плейтестов...[/bold green]", spinner="dots"):
+        with console.status(
+            f"[bold green]Gemini синтезирует {len(reports_payload)} отчётов...[/bold green]",
+            spinner="dots",
+        ):
             res = meta_analyzer.analyze_reports(
                 project=proj_obj,
                 reports_data=reports_payload,
-                focus_question=focus_q
+                focus_question=focus_q,
             )
 
         saved = ProjectManager.save_meta_recap(args.project, res.content)
         console.print("\n" + "=" * 80 + "\n")
-        console.print(Panel(Markdown(res.content), title=f"🧠 Сводный UX-аудит: {args.project}", border_style="magenta"))
+        console.print(
+            Panel(Markdown(res.content), title=f"🧠 Сводный аудит: {args.project}", border_style="magenta")
+        )
         console.print(f"\n[bold green]✅ Сводный отчет сохранен в:[/bold green] [cyan]{saved}[/cyan]")
         return
 
     # РЕЖИМ 2: АНАЛИЗ ОТДЕЛЬНОГО ВИДЕО
-    console.print(f"\n[cyan]Получение метаданных YouTube видео [bold]{args.url}[/bold]...[/cyan]")
-    yt_meta = fetch_youtube_metadata(args.url)
-    console.print(f"• Канал: [bold magenta]{yt_meta.get('channel_name')}[/bold magenta]")
-    console.print(f"• Просмотры: [bold green]{yt_meta.get('views_formatted')}[/bold green]")
-    console.print(f"• Название: {yt_meta.get('title')}")
+    console.print(f"\n[cyan]Подготовка к анализу видео [bold]{args.video}[/bold]...[/cyan]")
+    console.print(f"• Навык (Skill): [bold magenta]{chosen_skill.title}[/bold magenta]")
+    console.print(f"• Модель: [bold green]{args.model}[/bold green]")
 
-    prompt = build_analysis_prompt(
-        preset_key=args.preset,
+    prompt = SkillManager.build_prompt(
+        skill=chosen_skill,
         custom_questions=args.questions or [],
-        game_context=args.context
+        context=args.context,
     )
 
     try:
         analyzer = VideoAnalyzer(model=args.model)
         with console.status(
-            "[bold green]Gemini выполняет Agentic Video Understanding... Сканирует таймлайн и речь игрока...[/bold green]",
-            spinner="dots"
+            "[bold green]Gemini выполняет анализ видео через Agentic Video Understanding...[/bold green]",
+            spinner="dots",
         ):
-            result = analyzer.analyze(video_url=args.url, prompt=prompt)
+            result = analyzer.analyze(
+                video_source=args.video,
+                prompt=prompt,
+                progress_callback=lambda msg: console.print(f"[dim]{msg}[/dim]"),
+            )
 
     except Exception as e:
         console.print(f"\n[bold red]Ошибка:[/bold red] {e}")
         sys.exit(1)
 
-    # Формируем заголовок с каналом и просмотрами
+    # Формируем заголовок отчёта
+    meta = result.video_meta or {}
+    v_title = meta.get("title", Path(args.video).name)
+    ch_name = meta.get("channel_name", "Видеоматериал")
+    ch_url = meta.get("channel_url", "")
+    views_str = meta.get("views_formatted", "—")
+
     header_lines = [
-        "# 🎮 Отчет UX-анализа плейтеста\n",
-        f"- **Видео**: [{yt_meta.get('title')}]({result.video_url})",
-        f"- **Канал**: [{yt_meta.get('channel_name')}]({yt_meta.get('channel_url')})" if yt_meta.get('channel_url') else f"- **Канал**: {yt_meta.get('channel_name')}",
-        f"- **Просмотры**: {yt_meta.get('views_formatted')} просмотров",
+        f"# 📊 Анализ видео: {v_title}\n",
+        f"- **Навык**: {chosen_skill.title}",
+        f"- **Источник**: [{v_title}]({result.video_url})" if result.video_url.startswith("http") else f"- **Источник**: {v_title} ({ch_name})",
+        f"- **Канал / Хранилище**: [{ch_name}]({ch_url})" if ch_url else f"- **Канал / Хранилище**: {ch_name}",
+        f"- **Параметры**: {views_str}",
         f"- **Дата анализа**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **Модель**: {result.model}",
     ]
@@ -241,12 +281,17 @@ def main():
     full_report = "\n".join(header_lines) + "\n" + result.output_text
 
     console.print("\n" + "=" * 80 + "\n")
-    console.print(Panel(Markdown(full_report), title="📊 Отчет плейтеста", border_style="green"))
+    console.print(Panel(Markdown(full_report), title=f"📊 Отчет анализа: {v_title}", border_style="green"))
 
     # Сохраняем в reports/<project>/
-    clean_vid = VideoAnalyzer.extract_youtube_video_id(args.url) or "video"
+    safe_tag = (
+        VideoAnalyzer.extract_youtube_video_id(args.video)
+        or (GoogleDriveDownloader.extract_file_id(args.video) if "drive.google.com" in args.video else Path(args.video).stem)
+        or "video"
+    )
+    clean_tag = "".join(c for c in safe_tag if c.isalnum() or c in "_-")[:30]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"recap_{clean_vid}_{ts}.md"
+    filename = f"recap_{clean_tag}_{ts}.md"
     saved_path = ProjectManager.save_report(args.project, filename, full_report)
 
     console.print(f"\n[bold green]✅ Отчет успешно сохранен в проект:[/bold green] [cyan]{saved_path}[/cyan]")
